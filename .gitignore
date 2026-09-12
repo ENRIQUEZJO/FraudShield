@@ -1,0 +1,27 @@
+## .gitignore para proyectos .NET / Visual Studio 2022
+
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Archivos de compilación
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# Rider / VS Code
+.idea/
+.vscode/
+
+# NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+
+# Logs
+*.log
