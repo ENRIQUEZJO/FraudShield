@@ -1,0 +1,116 @@
+# docker-compose.yml
+#
+# Levanta todo el stack de FraudShield con un solo comando:
+#   docker-compose up --build
+#
+# Para escalar el backend a varias réplicas (varios contenedores
+# corriendo el mismo backend, repartiéndose la carga):
+#   docker-compose up --build --scale backend=3
+#
+# nginx descubre automáticamente cuántas réplicas de "backend" hay
+# corriendo y reparte las peticiones entre todas — no hace falta tocar
+# ninguna configuración al cambiar el número de réplicas.
+
+services:
+  # ============================================================
+  # BACKEND — la API de FraudShield (FastAPI + DeepFace + antifraude)
+  # ============================================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # NO se expone un puerto público aquí a propósito — nadie debe
+    # poder hablarle al backend directamente, solo a través de nginx
+    # (que es quien maneja HTTPS y reparte la carga). "expose" (a
+    # diferencia de "ports") solo lo hace visible DENTRO de la red
+    # privada de Docker, para que nginx sí pueda alcanzarlo.
+    expose:
+      - "8000"
+    environment:
+      # --- Conexión a SQL Server ---
+      # En producción real, esto normalmente apunta a un servidor
+      # ADMINISTRADO en la nube (Azure SQL, Amazon RDS for SQL Server),
+      # no a un contenedor — ver docs/DESPLIEGUE.md. El servicio
+      # "sqlserver" de este mismo archivo es solo para desarrollo/pruebas locales.
+      FRAUDSHIELD_DB_SERVER: ${FRAUDSHIELD_DB_SERVER:-sqlserver}
+      FRAUDSHIELD_DB_NAME: ${FRAUDSHIELD_DB_NAME:-FraudShieldDB}
+      # Autenticación SQL (usuario/contraseña) — obligatoria en este
+      # modo Docker, ya que "Trusted_Connection" (Windows) no aplica
+      # dentro de un contenedor Linux. "sa" es el usuario administrador
+      # que trae por defecto la imagen de SQL Server de Microsoft.
+      FRAUDSHIELD_DB_USER: ${FRAUDSHIELD_DB_USER:-sa}
+      FRAUDSHIELD_DB_PASSWORD: ${MSSQL_SA_PASSWORD:?Define MSSQL_SA_PASSWORD en tu archivo .env}
+      # --- Pool de conexiones (ver shared/db.py) ---
+      FRAUDSHIELD_DB_POOL_SIZE: ${FRAUDSHIELD_DB_POOL_SIZE:-20}
+      FRAUDSHIELD_DB_POOL_TIMEOUT: ${FRAUDSHIELD_DB_POOL_TIMEOUT:-10}
+      FRAUDSHIELD_DB_RECONNECT_SEGUNDOS: ${FRAUDSHIELD_DB_RECONNECT_SEGUNDOS:-30}
+      # --- Seguridad ---
+      # OBLIGATORIO cambiar esto en producción — ver docs/DESPLIEGUE.md.
+      # Debe ser EL MISMO valor en todas las réplicas del backend (para
+      # que un token generado por una réplica sea válido en las demás).
+      VISIONSEGURA_SECRET_KEY: ${VISIONSEGURA_SECRET_KEY:?Define VISIONSEGURA_SECRET_KEY en tu archivo .env}
+      # URL(s) real(es) del frontend en producción, separadas por coma.
+      FRAUDSHIELD_FRONTEND_URLS: ${FRAUDSHIELD_FRONTEND_URLS:-http://localhost}
+      # --- Motores de IA con datos reales (ver ai_models/) ---
+      FRAUDSHIELD_GRAPH_REFRESH_SEGUNDOS: ${FRAUDSHIELD_GRAPH_REFRESH_SEGUNDOS:-300}
+      FRAUDSHIELD_ML_RETRAIN_SEGUNDOS: ${FRAUDSHIELD_ML_RETRAIN_SEGUNDOS:-1800}
+    # deploy.resources es lo que le dice a Docker cuánta memoria/CPU
+    # reservar por cada réplica — importante porque TensorFlow/PyTorch
+    # consumen bastante memoria; sin este límite, una sola réplica
+    # descontrolada podría consumir toda la RAM del servidor.
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+
+  # ============================================================
+  # NGINX — HTTPS, balanceo de carga, sirve el frontend
+  # ============================================================
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Los certificados HTTPS se montan desde fuera del contenedor —
+      # así puedes reemplazarlos (por ejemplo, al renovar un
+      # certificado de Let's Encrypt) sin tener que reconstruir la imagen.
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # ============================================================
+  # SQL SERVER — SOLO para desarrollo/pruebas locales.
+  #
+  # ⚠️ En un despliegue de producción real para un banco, NO se
+  # recomienda correr la base de datos de producción dentro de un
+  # contenedor Docker en el mismo servidor — se pierde la
+  # gestión de backups automáticos, alta disponibilidad, parches de
+  # seguridad, etc. que ofrece un servicio administrado en la nube
+  # (Azure SQL Database, Amazon RDS for SQL Server). Este servicio
+  # existe aquí solo para poder probar el stack completo con
+  # "docker-compose up" sin tener que instalar SQL Server aparte.
+  #
+  # Para usar un SQL Server real en la nube en vez de este contenedor,
+  # simplemente define FRAUDSHIELD_DB_SERVER apuntando a esa instancia
+  # en tu archivo .env, y quita (o ignora) este servicio.
+  # ============================================================
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Define MSSQL_SA_PASSWORD en tu archivo .env}
+    ports:
+      - "1433:1433"  # expuesto solo para que puedas conectarte con SSMS/Azure Data Studio desde tu máquina y correr schema_sqlserver.sql
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    restart: unless-stopped
+
+volumes:
+  sqlserver_data:

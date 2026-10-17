@@ -1,0 +1,27 @@
+# .dockerignore — qué NO copiar dentro de la imagen de Docker.
+# Igual que .gitignore, pero para el build de Docker: reduce el tamaño
+# de la imagen y evita copiar cosas que no le sirven al contenedor
+# (o que podrían tener datos sensibles de tu máquina local).
+
+# Frontend: la imagen del backend no necesita node_modules ni el build
+# del frontend — el frontend se empaqueta por separado (ver nginx/).
+frontend/vite-app/node_modules
+frontend/vite-app/dist
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+
+# Control de versiones y configuración local
+.git
+.gitignore
+.env
+.env.local
+
+# Documentación y archivos que no hacen falta dentro del contenedor
+README.md
+docs/
+*.md
