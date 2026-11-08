@@ -36,6 +36,10 @@ pospuesta para después de la validación con el banco.
   instalado en la máquina
 - Sin SQL Server disponible, el backend arranca igual — cada módulo cae a
   un respaldo controlado (ver sección 6) en vez de fallar.
+- **Conexión a internet la primera vez** que se registre un rostro "difícil"
+  (por ejemplo, con la cabeza girada): DeepFace descarga el detector de
+  respaldo `retinaface` (~119 MB, se guarda en `~/.deepface/weights`) y
+  después queda en caché. Esa primera captura puede tardar bastante.
 
 ## 2. Base de datos
 
@@ -63,6 +67,17 @@ que un solo embedding, y más difícil de burlar con una sola foto estática.
 La columna `Usuarios.FaceEncoding` queda en la tabla solo por compatibilidad
 con filas antiguas; el código ya no escribe ahí.
 
+**Detección de rostro con detectores de respaldo**: `get_encoding()` en
+`modulo_biometria/services/face_engine.py` prueba tres detectores de
+DeepFace en orden — `opencv` (rápido, pero solo reconoce bien rostros casi
+de frente), `retinaface` y `mtcnn` (ambos detectan rostros girados). Solo
+pasa al siguiente si el anterior no encuentra rostro, así que el caso
+normal (rostro de frente) sigue igual de rápido. Esto es lo que permite
+que el gesto `izquierda` del registro sea reconocido por el backend. La
+lista está en la constante `DETECTORES`, justo encima de `get_encoding`.
+Cuando se usa un detector de respaldo, la consola del backend imprime
+`Rostro detectado con el detector de respaldo '<nombre>'`.
+
 Incluye el trigger de "vaciado rápido en cuenta dormida" (equivalente al
 que tenía la versión PostgreSQL original, convertido a T-SQL).
 
@@ -73,10 +88,12 @@ cuenta dormida para probar el trigger):
 python database/seed_data.py
 ```
 
-> Si ya habías corrido `schema_sqlserver.sql` antes de esta actualización
-> (sin la tabla `PerfilesFaciales`), puedes volver a correrlo sin
-> problema — todas las sentencias usan `IF NOT EXISTS`, así que solo
-> agrega lo que falta sin tocar tus tablas existentes.
+> Si ya habías corrido `schema_sqlserver.sql` antes de una actualización
+> (por ejemplo, sin la tabla `PerfilesFaciales`, o con `ApiKeys` creada
+> antes de que existiera `Empresas`), puedes volver a correrlo completo
+> sin problema — todas las sentencias usan `IF NOT EXISTS`, así que solo
+> agrega lo que falta (tablas y columnas, incluida `ApiKeys.EmpresaId`)
+> sin tocar tus tablas existentes.
 
 ## 3. Backend
 
@@ -148,6 +165,19 @@ Probado en este entorno con un servidor simulado: caída al arrancar →
 recuperación automática, caída en pleno funcionamiento (con peticiones
 en curso) → recuperación automática, sin corromper el pool ni perder
 ninguna petición que ya estaba usando una conexión al momento de la caída.
+
+**Clave secreta de los tokens de sesión (JWT):**
+
+```bash
+export VISIONSEGURA_SECRET_KEY=una_clave_larga_y_aleatoria
+```
+
+Si no se define, el backend usa una clave por defecto escrita en el código
+— cualquiera que la conozca podría fabricar un token de administrador.
+**Defínela siempre antes de exponer el backend fuera de tu máquina**
+(túnel, servidor, etc.). Genera una con
+`python -c "import secrets; print(secrets.token_hex(32))"`. Al cambiarla
+se invalidan las sesiones abiertas y hay que iniciar sesión de nuevo.
 
 **CORS restringido a la URL real del frontend:**
 
@@ -267,14 +297,20 @@ segundos, requiere internet). Si el detector no carga o falla por
 cualquier razón, queda un botón de "Capturar manualmente" como respaldo
 para no bloquear el registro.
 
-> ⚠️ Esta detección automática **no se pudo probar con una cámara real**
-> en el entorno donde se desarrolló (sin navegador/webcam disponible) —
-> se verificó que el código compila y el modelo se carga, pero los rangos
-> de ángulo (`RANGOS_GESTOS` en `useDeteccionGestoFacial.js`) están
-> calibrados de forma razonable, no probados con rostros reales. Es
-> posible que necesites ajustar esos rangos (más flexibles o más
-> estrictos) según cómo se sienta en la práctica — están comentados en el
-> archivo para que sea fácil tocarlos.
+> **Calibración con cámara real:** esta detección se probó con una cámara
+> real y se corrigieron dos cosas. (1) Las constantes `MEJILLA_IZQ` y
+> `MEJILLA_DER` deben apuntar a puntos distintos del rostro (234 y 454): si
+> son iguales, el ancho de la cara da 0 y el `yaw` se queda fijo en 0.50, así
+> que ningún giro se detecta. (2) El rango de `izquierda` se bajó a `yaw`
+> 0.60–0.75 (antes llegaba a 0.85, un giro casi de perfil que el backend no
+> reconocía como rostro). Los rangos están en `RANGOS_GESTOS` en
+> `useDeteccionGestoFacial.js`, comentados para que sea fácil ajustarlos.
+>
+> **Al registrarse:** gira la cabeza solo hasta la mitad — la nariz apunta
+> hacia el lado, pero todavía se ven los dos ojos. Un perfil completo no
+> pasa. Evita el botón "Capturar manualmente" con giros extremos: no valida
+> el ángulo, y el backend rechazará la foto con "No se detectó rostro en la
+> foto de '<gesto>'".
 
 Es **una sola página** (React SPA) con:
 
@@ -298,7 +334,8 @@ Es **una sola página** (React SPA) con:
     "Procesar manualmente" como respaldo. Historial de veredictos
     combinados.
 - **Administración** — solo visible si el usuario tiene rol `admin`
-  (guardado en `localStorage.rol` desde el login). Tres pestañas:
+  (guardado en `localStorage.rol` al iniciar sesión — si cambias el rol en
+  la base de datos, cierra sesión y vuelve a entrar). Cinco pestañas:
   - *Usuarios*: lista todos los usuarios registrados (nombre, email,
     documento, rol, cuántos ángulos faciales tiene guardados) con un
     selector por fila para asignarlo a una empresa.
@@ -308,6 +345,12 @@ Es **una sola página** (React SPA) con:
     automática de 4 ángulos, pero con un selector de empresa adicional
     — para que un admin dé de alta usuarios directamente sin que se
     autorregistren.
+  - *Revisar verificaciones*: casos en `REVISION_MANUAL` para aprobar o
+    rechazar a mano (ver sección 5).
+  - *API Keys*: generar la credencial de un banco o institución (asociada a
+    una empresa y con su propio límite de peticiones por segundo), cambiar
+    ese límite y revocarla. La key se muestra una sola vez al crearla (ver
+    sección 4).
 
 > Para tener tu primer usuario admin, regístrate normalmente y luego
 > ejecuta en SQL Server: `UPDATE Usuarios SET Rol = 'admin' WHERE Email
@@ -320,10 +363,6 @@ Es **una sola página** (React SPA) con:
 > se pudo probar en un navegador real qué tan cómodo se siente ese
 > tiempo de espera — si se siente muy apurado o muy lento, es el valor
 > `DEBOUNCE_AUTO_ENVIO_MS` al inicio de cada archivo.
-  - *Sistema Antifraude*: formulario para evaluar una transacción de
-    prueba + historial de evaluaciones.
-  - *Orquestador*: formulario para probar el flujo completo (foto +
-    datos de transacción) + historial de veredictos combinados.
 
 ## 7. Frontend — pantalla de transferencia (sistema-antifraude, independiente)
 
@@ -403,27 +442,23 @@ encontraron en el proceso:
 - Varios endpoints sin el chequeo de "sin conexión DB" (dejaban un
   error genérico feo en vez de un mensaje claro).
 
-**Documentados como limitaciones conocidas (no se tocó el
-comportamiento, solo se dejó explícito en comentarios):**
-- El análisis de grafos (`graph_analyzer.py`) y el modelo de ML
-  (`model.py`) usan datos de ejemplo fijos/sintéticos, no aprenden de
-  transacciones reales todavía — normal para un MVP, pero hay que
-  reemplazarlos con datos reales antes de producción.
-- `core/telemetry_parser.py` y `services/security.py::generar_api_key`
-  existen pero no los usa ningún otro archivo — código huérfano,
-  heredado de versiones anteriores.
-- `obtenerHistorialAdmin`/`accionarRegistro` en `api.js` tienen su
-  endpoint funcionando en el backend, pero ninguna pantalla del
-  frontend los usa — falta construir una vista de "revisar
-  verificaciones en REVISION_MANUAL" para que el admin las apruebe/
-  rechace a mano.
-- La conexión a SQL Server (`shared/db.py`) es una sola, compartida por
-  toda la app — funciona bien con un usuario a la vez (como en las
-  pruebas actuales), pero antes de producción con usuarios concurrentes
-  reales, necesita convertirse en un pool de conexiones.
-- CORS está configurado para aceptar cualquier origen (`*`) — bien para
-  el MVP, pero debe restringirse a la URL real del frontend antes de
-  un despliegue con el banco.
+**Limitaciones que se documentaron en esa revisión y que ya se
+resolvieron** (cada una tiene su sección con el detalle):
+- Grafos y ML con datos de ejemplo fijos → ya usan las transferencias
+  reales de la tabla `Transferencias`; el modelo de ML cae al sintético
+  mientras haya menos de 30 transacciones reales (sección 4).
+- Falta de una pantalla para revisar casos en `REVISION_MANUAL` → pestaña
+  "Revisar verificaciones" del panel de admin (sección 5).
+- Una sola conexión compartida a SQL Server → pool de conexiones con
+  reconexión automática (sección 4).
+- CORS abierto a cualquier origen (`*`) → restringido a las URLs de
+  `FRAUDSHIELD_FRONTEND_URLS` (sección 4).
+- `services/security.py::generar_api_key` sin usar → ahora se usa al crear
+  API keys desde el panel de admin (sección 4).
+
+**Sigue vigente:**
+- `core/telemetry_parser.py` no lo usa ningún otro archivo — código
+  huérfano heredado, no afecta el funcionamiento (ver sección 11).
 
 **Probado de punta a punta en este entorno** (con foto real, TensorFlow/
 DeepFace/PyTorch funcionando): registro con validaciones, evaluación de
@@ -479,7 +514,7 @@ Esas versiones específicas son de principios de 2024, antes de que existiera Py
 Es la señal de que el entorno virtual no estaba activado en ese momento — revisa el punto anterior sobre activación en PowerShell antes de instalar de nuevo.
 
 **`"No se detectó rostro"` al registrarte o verificar, aunque la foto se vea bien**
-Puede tener dos causas distintas:
+Puede tener tres causas distintas:
 1. Resolución de captura muy baja (ya corregida a 640x480 en el frontend).
 2. **Bug conocido de `opencv-python==5.0.0.93`**: esa versión viene con la
    carpeta `cv2/data` vacía (sin los archivos `.xml` de detección facial),
@@ -487,6 +522,13 @@ Puede tener dos causas distintas:
    encuentra un rostro. El `requirements.txt` ya fija la versión
    `4.10.0.84`, que no tiene este problema — si ves este error, confirma
    con `pip show opencv-python` que tienes la 4.10.0.84 y no la 5.x.
+3. **Cabeza demasiado girada** (típico en el gesto `izquierda`, con el
+   mensaje "No se detectó rostro en la foto de 'izquierda'"): el detector
+   `opencv` casi solo reconoce rostros de frente. El backend ya prueba
+   `retinaface` y `mtcnn` como respaldo (ver sección 2); si aun así falla,
+   gira menos (solo hasta la mitad) y repite esa captura tocando su
+   miniatura. La primera vez que se usa `retinaface` tarda porque descarga
+   el modelo (~119 MB) y necesita internet.
 
 Si sigues viendo el error con la versión correcta de opencv-python:
 - Asegúrate de tener buena iluminación y el rostro centrado, ocupando buena
@@ -544,3 +586,38 @@ cd FraudShield/frontend/vite-app
 npm install
 npm run dev
 ```
+
+**`Invalid column name 'EmpresaId'` (42S22) al registrarte o en `/admin/api-keys`**
+La base de datos se creó con una versión anterior del schema y le faltan
+tablas o columnas (por ejemplo, `Usuarios` o `ApiKeys` sin `EmpresaId`, o la
+tabla `ApiKeys` sin crear). Solución: vuelve a ejecutar **completo**
+`database/schema_sqlserver.sql` contra `FraudShieldDB` (en SSMS: abrir el
+archivo y pulsar Execute). Es seguro: solo agrega lo que falta y no borra
+datos. Para verificarlo, esta consulta debe devolver una fila para
+`Usuarios` y otra para `ApiKeys`:
+```sql
+USE FraudShieldDB;
+GO
+SELECT t.name AS Tabla, c.name AS Columna
+FROM sys.columns c
+JOIN sys.tables t ON t.object_id = c.object_id
+WHERE c.name = 'EmpresaId' AND t.name IN ('Usuarios', 'ApiKeys');
+```
+Confirma también que estás ejecutándolo en el mismo servidor y base a los
+que se conecta el backend (`FRAUDSHIELD_DB_SERVER` / `FRAUDSHIELD_DB_NAME`).
+
+**El gesto nunca se detecta: la barra de progreso no avanza**
+Para ver qué pasa, agrega temporalmente esta línea en
+`useDeteccionGestoFacial.js`, justo debajo de `const pose = calcularPose(...)`,
+abre la consola del navegador (F12) y gira la cabeza:
+```javascript
+console.log("yaw:", pose.yaw.toFixed(2), "pitch:", pose.pitch.toFixed(2));
+```
+- Si el `yaw` se queda siempre en **0.50**, revisa que `MEJILLA_IZQ = 234` y
+  `MEJILLA_DER = 454` (deben ser distintos).
+- Si el `yaw` pasa de **0.75** al girar a la izquierda, giraste demasiado:
+  gira solo hasta la mitad (el rango válido es 0.60–0.75).
+- Si baja de 0.40 al girar hacia el lado equivocado, los rangos de izquierda
+  y derecha están al revés para tu cámara.
+
+Borra el `console.log` al terminar: imprime cientos de líneas por segundo.
