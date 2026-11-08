@@ -27,35 +27,34 @@ UMBRAL_SIMILITUD = 0.60  # por encima de esto, se considera "la misma persona" (
 # ==========================================
 # RECONOCIMIENTO FACIAL (reemplaza Haar + correlación de píxeles)
 # ==========================================
+DETECTORES = ["opencv", "retinaface", "mtcnn"]
+
 
 def get_encoding(frame):
     """Extrae un embedding facial real (vector de 128 dimensiones con
-    Facenet) usando un modelo entrenado, en vez de comparar píxeles
-    crudos en escala de grises.
+    Facenet) usando un modelo entrenado.
+
+    Devuelve None si ningún detector logra encontrar un rostro.
     """
-    try:
-        # DeepFace.represent(): detecta el rostro en la imagen y lo
-        # convierte en un vector numérico (el "embedding").
-        # enforce_detection=True: si NO encuentra un rostro, lanza una
-        # excepción en vez de devolver algo vacío silenciosamente —
-        # por eso está todo dentro de un try/except.
-        resultados = DeepFace.represent(
-            img_path=frame,
-            model_name=MODELO_EMBEDDING,
-            enforce_detection=True,
-        )
-        if not resultados:
-            return None
-        # DeepFace puede devolver varios rostros si hay más de una cara
-        # en la foto — se toma el primero ([0]) asumiendo que la persona
-        # está sola frente a la cámara.
-        return np.array(resultados[0]["embedding"], dtype=np.float64)
-    except Exception as e:
-        # Cualquier fallo (no se detectó rostro, imagen corrupta, etc.)
-        # se traduce en "None" — quien llama a esta función ya sabe
-        # manejar ese caso como "no se pudo procesar la foto".
-        print(f"[face_engine] No se detectó rostro o falló el embedding: {e}")
-        return None
+    ultimo_error = None
+    for detector in DETECTORES:
+        try:
+            resultados = DeepFace.represent(
+                img_path=frame,
+                model_name=MODELO_EMBEDDING,
+                detector_backend=detector,
+                enforce_detection=True,
+            )
+            if not resultados:
+                continue
+            if detector != DETECTORES[0]:
+                print(f"[face_engine] Rostro detectado con el detector de respaldo '{detector}'")
+            return np.array(resultados[0]["embedding"], dtype=np.float64)
+        except Exception as e:
+            ultimo_error = e
+
+    print(f"[face_engine] No se detectó rostro con ningún detector ({', '.join(DETECTORES)}): {ultimo_error}")
+    return None
 
 
 def calcular_similitud(encoding, db_encoding) -> float:

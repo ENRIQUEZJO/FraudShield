@@ -156,6 +156,7 @@ export function useDeteccionGestoFacial({ videoRef, gestoObjetivo, activo, onGes
 
         if (resultado.faceLandmarks && resultado.faceLandmarks.length > 0) {
           const pose = calcularPose(resultado.faceLandmarks[0]);
+          console.log("yaw:", pose.yaw.toFixed(2), "pitch:", pose.pitch.toFixed(2));
           const coincide = poseCoincideConGesto(pose, gestoObjetivo);
 
           if (coincide) {
